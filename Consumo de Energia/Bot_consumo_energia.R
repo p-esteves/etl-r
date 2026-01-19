@@ -1,3 +1,10 @@
+# ==============================================================================
+# SCRIPT: CONSUMO DE ENERGIA (ANEEL - SIGA)
+# OBJETIVO: Extrair dados de consumo de energia por classe e regiao do site da ANEEL.
+#           Usa automação de navegador (RSelenium) para iterar sobre filtros no painel web,
+#           raspar as tabelas, consolidar com histórico existente e carregar no banco.
+# ==============================================================================
+
 source("V:/Energia/Rfunctions.R")
 packages(c("XML","DBI","tictoc","rvest","stringr","httr","data.table","lubridate",
            "curl","devtools","startup","tidyr","magrittr","odbc","RODBC","RSelenium"))
@@ -6,15 +13,21 @@ rm(list = ls())
 options(warn=-1)
 options(stringsAsFactors = FALSE)
 
+# ------------------------------------------------------------------------------
+# 1. DEFINIÇÃO DE EXTRAÇÃO (RSELENIUM)
+# ------------------------------------------------------------------------------
+
 url <- 'http://relatorios.aneel.gov.br/_layouts/xlviewer.aspx?id=/RelatoriosSAS/RelSAMPRegiaoEmp.xlsx'
 
 #v <- binman::list_versions("chromedriver")$`win32` #listar versoes instaladas do chrome pra escolher qual rodar
 
+# Inicialização do Driver (Firefox)
 rD <- rsDriver(browser="firefox") #tem que dar o valor possível de rodar #inicia o servidor nesta versao do navegador 
 #rD[["server"]]$stop() #para de rodar o servidor
 bw <- rD[["client"]]
 bw$navigate(url) #navega ao site especificado
 
+# Função auxiliar para interagir com os filtros do painel Excel Online
 click <- function(type,value1,value2) {
   
   if (type=='ano') {
@@ -96,7 +109,7 @@ click <- function(type,value1,value2) {
       
     }
     
-    # BOTÃO CONFIRMA (OK)
+    # BOTÃƒO CONFIRMA (OK)
     
     Sys.sleep(time)
     ok <- bw$findElement(using='xpath',"/descendant::button[@class='ewa-dlg-button'][1]")
@@ -106,7 +119,9 @@ click <- function(type,value1,value2) {
   }}
 
 
-# EXTRAÇÂO DO PORTAL ANEEL
+# ------------------------------------------------------------------------------
+# 2. EXECUÇÃO DA EXTRAÇÃO (LOOP DE SCRAPING)
+# ------------------------------------------------------------------------------
 
 regiao <- c('NE','CO','N','SE','S')
 classe <- 1:11
@@ -151,7 +166,7 @@ for (r in 1:(nrow(comb))) {
     while (!is.null(erro)) {
       erro <- try(click(tp[n],vlr1[n],vlr2[n]),silent=TRUE)
       time = 1.15*time
-      # if(time > 10) stop('Falha na conexão.')
+      # if(time > 10) stop('Falha na conexÃ£o.')
     }
   }
   
@@ -199,7 +214,7 @@ for (r in 1:(nrow(comb))) {
       if (nrow(tabela3)>0) {
         
         tabela3 <- cbind(ano_,mes_,regiao_,classe_,tabela3) %>% as.data.frame()
-        titulos1_ <- c('Ano','Mês','Região','Classe de Consumo') %>% as.vector()
+        titulos1_ <- c('Ano','MÃªs','RegiÃ£o','Classe de Consumo') %>% as.vector()
         titulos2_ <- tabela2[5,]
         
         colnames(tabela3) <- c(titulos1_,titulos2_)
@@ -224,7 +239,9 @@ colnames(consumo_energetico2) <- c("CLASSE_CONSUMO","NOME_REGIAO","NOME_AGENTE",
 
 
 
-############################ TRATAMENTO #########################################
+# ------------------------------------------------------------------------------
+# 3. TRATAMENTO DE DADOS
+# ------------------------------------------------------------------------------
 
 ce <- consumo_energetico2
 
@@ -262,11 +279,19 @@ for(i in 1:nrow(ce2)){
 
 ce2$MES <- ce2$MES %>% as.numeric() %>% formatC(width=2,flag="0")
 
-######### DONWLOAD DOS ANOS ANTERIORES / BANCO DE DADOS FIEC #########
+# ------------------------------------------------------------------------------
+# 4. CARGA INCREMENTAL (LER HISTÓRICO E UNIR)
+# ------------------------------------------------------------------------------
 
-con <- dbConnect(odbc(),Driver = "SQL Server",Database = "",encoding = "CP1252",
-                 Server = "",UID = "",
-                 PWD = "",Port = )
+# Download dos dados anteriores do Banco de Dados
+con <- dbConnect(odbc(),
+                 Driver = "SQL Server",
+                 encoding = "CP1252",
+                 Server = Sys.getenv("DB_SERVER", "localhost"),
+                 Database = Sys.getenv("DB_DATABASE", "SEU_BANCO"),
+                 UID = Sys.getenv("DB_UID"),
+                 PWD = Sys.getenv("DB_PWD"),
+                 Port = 1433)
 
 banco_fiec <- dbReadTable(con,"ENERGIA_CONSUMO_F") %>% cbind(paste(.[,4],.[,5],sep="-"),.)
 colnames(banco_fiec)[1] <- "ANO-MES"
@@ -289,19 +314,19 @@ colnames(ce2) <- c("NM_CLASSE_CONSUMO","NM_REGIAO","NM_AGENTE","ANO","MES",
 
 ce3 <- rbind(ce2,banco_fiec2[,-1]) %>% as.data.frame(stringsAsFactors=F,dec=",")
 
+# Sanitização de caracteres especiais (Corrigindo encoding incorreto)
 ce3$NM_AGENTE <- ce3$NM_AGENTE %>% 
-                   chartr("ÁÉÍÓÚÂÊÎÔÛÃÕÇ","AEIOUAEIOUAOC",.)
+                   chartr("Ã Ã‰Ã Ã“ÃšÃ‚ÃŠÃŽÃ”Ã›ÃƒÃ•Ã‡","AEIOUAEIOUAOC",.)
 
 ce3$DT_REGISTRO <- as.character(ce3$DT_REGISTRO)
 
 ce3$MES <- ce3$MES %>% formatC(width=2,flag="0")
 
 
-######## UPLOAD PARA O BANCO #########
+# ------------------------------------------------------------------------------
+# 5. CARGA FINAL NO BANCO DE DADOS
+# ------------------------------------------------------------------------------
 
-#con = odbcConnect("SQL")
-#sqlDrop(con,'ENERGIA_Consumo_Energia')
-#sqlSave(con,ce3,'ENERGIA_Consumo_Energia',rownames=F)
 colnames(ce3) <- c("NM_CLASSE_CONSUMO","NM_REGIAO","NM_AGENTE","ANO","MES",
                    "VL_NUMERO_CONSUMIDORES","VL_ENERGIA_MWH",
                    "VL_RECEITA_FORNECIMENTO_ENERGIA_SEM_TRIBUTOS",
@@ -311,16 +336,18 @@ colnames(ce3) <- c("NM_CLASSE_CONSUMO","NM_REGIAO","NM_AGENTE","ANO","MES",
                    "DT_REGISTRO")
 
 
+# Reutiliza conexão ou abre nova se fechada (aqui abrindo nova)
 con <- DBI::dbConnect(odbc::odbc(),
                       encoding = "Latin1",
-                      uid = "",
-                      pwd="",
-                      Driver = "",
-                      Server = "",
-                      Database = "",
-                      Port = )
+                      Driver = "SQL Server",
+                      Server = Sys.getenv("DB_SERVER", "localhost"),
+                      Database = Sys.getenv("DB_DATABASE", "SEU_BANCO"),
+                      uid = Sys.getenv("DB_UID"),
+                      pwd = Sys.getenv("DB_PWD"),
+                      Port = 1433)
 
+tic()
+dbWriteTable(con, "ENERGIA_CONSUMO_F", ce3, overwrite = T, row.names=FALSE)
+toc()
 
-
-tic();dbWriteTable(con, "ENERGIA_CONSUMO_F", ce3, overwrite = T,row.names=FALSE);toc()
-
+dbDisconnect(con)
